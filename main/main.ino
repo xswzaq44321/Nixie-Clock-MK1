@@ -1,6 +1,5 @@
 #include <Wire.h>
-#include "RTClib.h"
-#include "ShiftRegister.h"
+#include "shift_register.h"
 
 #define SET_INTERVAL(TIME, CALLBACK, ...)\
 do {\
@@ -10,6 +9,8 @@ do {\
     t = millis();\
   }\
 } while(0)
+
+byte numberToDisplay[IC_COUNT];
 
 enum MODE {
   NORMAL,
@@ -21,9 +22,13 @@ enum MODE {
 };
 
 int mode = NORMAL;
-byte numberToDisplay[IC_COUNT];
-RTC_DS3231 rtc;
-DateTime currentTime;
+byte system_flags = 0b00000010;
+#define FLAG_UPDATE (1 << 0)
+#define FLAG_LED    (1 << 1)
+#define FLAG_DATE   (1 << 2)
+#define FLAG_12HR   (1 << 3)
+
+
 
 /**************************************************************************/
 /* PWM INTERRUPT */
@@ -56,7 +61,7 @@ ISR(TIMER1_COMPA_vect){
 }
 
 ISR(TIMER1_OVF_vect){
-  fastShiftOutArr(numberToDisplay);
+  pushData(numberToDisplay);
 }
 /**************************************************************************/
 
@@ -111,10 +116,10 @@ ISR(PCINT0_vect){
   if ((stateChange & MASK_BTN_LIGHT) && millis() - TIME_BTN_LIGHT >= DEBOUNCE_DELAY) {
     buttonPressed ^= MASK_BTN_LIGHT;
     if (buttonPressed & MASK_BTN_LIGHT) {
-      // TODO
+      btn_LIGHT_press();
     }
     else {
-      // TODO
+      // NOP
     }
     TIME_BTN_LIGHT = millis();
   }
@@ -123,10 +128,10 @@ ISR(PCINT0_vect){
   if ((stateChange & MASK_BTN_START) && millis() - TIME_BTN_START >= DEBOUNCE_DELAY) {
     buttonPressed ^= MASK_BTN_START;
     if (buttonPressed & MASK_BTN_START) {
-      // TODO
+      btn_START_press();
     }
     else {
-      // TODO
+      btn_START_release();
     }
     TIME_BTN_START = millis();
   }
@@ -135,10 +140,10 @@ ISR(PCINT0_vect){
   if ((stateChange & MASK_BTN_RESET) && millis() - TIME_BTN_RESET >= DEBOUNCE_DELAY) {
     buttonPressed ^= MASK_BTN_RESET;
     if (buttonPressed & MASK_BTN_RESET) {
-      // TODO
+      btn_RESET_press();
     }
     else {
-      // TODO
+      // NOP
     }
     TIME_BTN_RESET = millis();
   }
@@ -148,18 +153,33 @@ ISR(PCINT0_vect){
 
 
 
+/**************************************************************************/
+/* RTC */
+#include "RTClib.h"
+
+RTC_DS3231 rtc;
+DateTime currentTime;
+
 /*
- * update [numberToDisplay] every second
- * will NOT push data to nixie tube
+ * Update [numberToDisplay] to current time (hr, min, sec) every second
+ * or FLAG_UPDATE is on.
+ * Will NOT push data to nixie tube.
+ * Set PM to true to update to 12-hour clock.
  */
-inline void updateTime() {
+inline void updateHMS(bool PM = false) {
   DateTime tmp_t = rtc.now();
-  if (tmp_t.second() != currentTime.second()) {
+    
+  if (system_flags & FLAG_UPDATE || tmp_t.second() != currentTime.second()) {
     currentTime = tmp_t;
+
+    /* turn 24-hour clock to 12-hour clock */
+    int tmp_hour = currentTime.hour();
+    if (PM && tmp_hour > 12)
+    tmp_hour -= 12;
     
     #ifdef IC_COUNT_8
-    numberToDisplay[7] = currentTime.hour() / 10;
-    numberToDisplay[6] = currentTime.hour() % 10;
+    numberToDisplay[7] = tmp_hour / 10;
+    numberToDisplay[6] = tmp_hour % 10;
     numberToDisplay[5] = NO_LIGHT;
     numberToDisplay[4] = currentTime.minute() / 10;
     numberToDisplay[3] = currentTime.minute() % 10;
@@ -167,12 +187,46 @@ inline void updateTime() {
     numberToDisplay[1] = currentTime.second() / 10;
     numberToDisplay[0] = currentTime.second() % 10;
     #else
-    numberToDisplay[5] = currentTime.hour() / 10;
-    numberToDisplay[4] = currentTime.hour() % 10;
+    numberToDisplay[5] = tmp_hour / 10;
+    numberToDisplay[4] = tmp_hour % 10;
     numberToDisplay[3] = currentTime.minute() / 10;
     numberToDisplay[2] = currentTime.minute() % 10;
     numberToDisplay[1] = currentTime.second() / 10;
     numberToDisplay[0] = currentTime.second() % 10;
+    #endif
+  }
+}
+
+/*
+ * Update [numberToDisplay] to current date if the date changes
+ * or FLAG_UPDATE is on.
+ * Will NOT push data to nixie tube.
+ */
+inline void updateDate() {
+  DateTime tmp_t = rtc.now();
+  if (system_flags & FLAG_UPDATE || tmp_t.day() != currentTime.day()) {
+    currentTime = tmp_t;
+    
+    #ifdef IC_COUNT_8
+    int tmp_year = currentTime.year();
+    for (int i = 4; i <= 7; ++i) {
+      numberToDisplay[i] = tmp_year % 10;
+      tmp_year /= 10;
+    }
+    numberToDisplay[3] = currentTime.month() / 10;
+    numberToDisplay[2] = currentTime.month() % 10;
+    numberToDisplay[1] = currentTime.day() / 10;
+    numberToDisplay[0] = currentTime.day() % 10;
+    #else
+    int tmp_year = currentTime.year();
+    for (int i = 4; i <= 5; ++i) {
+      numberToDisplay[i] = tmp_year % 10;
+      tmp_year /= 10;
+    }
+    numberToDisplay[3] = currentTime.month() / 10;
+    numberToDisplay[2] = currentTime.month() % 10;
+    numberToDisplay[1] = currentTime.day() / 10;
+    numberToDisplay[0] = currentTime.day() % 10;
     #endif
   }
 }
@@ -182,19 +236,108 @@ inline void rtc_setup() {
   currentTime = rtc.now();
 
   /* need to call adjust() if RTC is used for the first time */
-  // rtc.adjust(DateTime(2021, 1, 1, 3, 30, 25));
+  rtc.adjust(DateTime(2021, 4, 23, 21, 45, 0));
+}
+/**************************************************************************/
+
+
+
+/**************************************************************************/
+/* LED */
+
+// To disable pragma messages on compile
+// include this Before including FastLED.h
+#define FASTLED_INTERNAL
+#include <FastLED.h>
+
+#define LED_PIN 7
+CRGB leds[IC_COUNT];
+CHSV ledColor = CHSV(208.0 / 360 * 255, 89.0 / 100 * 255, 60);
+
+inline void led_setup() {
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, IC_COUNT);
+  fill_solid(leds, IC_COUNT, ledColor);
+  FastLED.show();
+}
+/**************************************************************************/
+
+
+
+
+/**************************************************************************/
+/* BUTTON ACTIONS */
+
+inline void btn_LIGHT_press() {
+  switch (mode) {
+  case NORMAL:
+    system_flags ^= FLAG_LED;
+    if (system_flags & FLAG_LED) {
+      fill_solid(leds, IC_COUNT, ledColor);
+    }
+    else {
+      fill_solid(leds, IC_COUNT, CRGB(0,0,0));
+    }
+    FastLED.show();
+    break;
+  }
+}
+
+inline void btn_START_press() {
+  switch (mode) {
+  case NORMAL:
+    system_flags |= FLAG_DATE;
+    system_flags |= FLAG_UPDATE;
+    break;
+  }
+}
+
+inline void btn_START_release() {
+  switch (mode) {
+  case NORMAL:
+    system_flags &= ~FLAG_DATE;
+    system_flags |= FLAG_UPDATE;
+    break;
+  }
+}
+
+inline void btn_RESET_press() {
+  switch (mode) {
+  case NORMAL:
+    system_flags ^= FLAG_12HR;
+    system_flags |= FLAG_UPDATE;
+    break;
+  }
+}
+/**************************************************************************/
+
+
+
+inline void updateClock() {
+  if (system_flags & FLAG_DATE) {
+    updateDate();
+  }
+  else {
+    updateHMS(system_flags & FLAG_12HR);
+  }
 }
 
 void setup() {
-  Serial.begin(9600);
-  
   timer_setup();
   
   register_setup();
   rtc_setup();
   button_setup();
+  led_setup();
 }
 
 void loop() {
-  SET_INTERVAL(100, updateTime);
+  /* update clock instantly (when ISR is called) */
+  if (system_flags & FLAG_UPDATE) {  
+    updateClock();
+    system_flags &= ~FLAG_UPDATE;
+    return;
+  }
+
+  /* update clock every 100ms */
+  SET_INTERVAL(100, updateClock);
 }
