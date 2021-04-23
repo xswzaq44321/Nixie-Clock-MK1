@@ -69,6 +69,7 @@ ISR(TIMER1_OVF_vect){
 
 /**************************************************************************/
 /* BUTTON INTERRUPT */
+
 void button_setup() {
   /* set PB2,4,5,6 as input */
   DDRB &= ~(1 << PB2 | 1 << PB4 | 1 << PB5 | 1 << PB6);
@@ -83,8 +84,6 @@ void button_setup() {
 ISR(PCINT0_vect){
   #define DEBOUNCE_DELAY 10
 
-  static const int PCINT0_Pins[] = {PB4, PB5, PB6, PB2};
-  static const int buttonCount = sizeof(PCINT0_Pins) / sizeof(*PCINT0_Pins);  
   static byte buttonPressed = 0;
 
   static unsigned long TIME_BTN_MODE = 0;
@@ -92,8 +91,8 @@ ISR(PCINT0_vect){
   static unsigned long TIME_BTN_START = 0;
   static unsigned long TIME_BTN_RESET = 0;
 
-  static const byte MASK_BTN_MODE  = 1 << PB4;
-  static const byte MASK_BTN_LIGHT = 1 << PB5;
+  static const byte MASK_BTN_LIGHT = 1 << PB4;
+  static const byte MASK_BTN_MODE  = 1 << PB5;
   static const byte MASK_BTN_START = 1 << PB6;
   static const byte MASK_BTN_RESET = 1 << PB2;
 
@@ -104,7 +103,7 @@ ISR(PCINT0_vect){
   if ((stateChange & MASK_BTN_MODE) && millis() - TIME_BTN_MODE >= DEBOUNCE_DELAY) {
     buttonPressed ^= MASK_BTN_MODE;
     if (buttonPressed & MASK_BTN_MODE) {
-      mode++;
+      ++mode %= CNT;
     }
     else {
       // NOP
@@ -263,7 +262,6 @@ inline void led_setup() {
 
 
 
-
 /**************************************************************************/
 /* BUTTON ACTIONS */
 
@@ -321,7 +319,7 @@ inline void updateClock() {
   }
 }
 
-void setup() {
+void setup() {    
   timer_setup();
   
   register_setup();
