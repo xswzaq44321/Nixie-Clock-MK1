@@ -44,7 +44,7 @@
 #define MSDATASET(X) (X) ? (MSDATAHIGH) : (MSDATALOW)
 #define MSCLOCKFLICK do {MSCLOCKHIGH; MSCLOCKLOW;} while (0)
 
-static inline register_setup() {
+static inline void register_setup() {
   pinMode(ST_CP, OUTPUT);
   pinMode(SH_CP, OUTPUT);
   pinMode(DS, OUTPUT);

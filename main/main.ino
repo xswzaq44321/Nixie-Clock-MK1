@@ -10,50 +10,44 @@ do {\
   }\
 } while(0)
 
+void rotateCW(bool);
+
 byte numberToDisplay[IC_COUNT];
 
-enum MODE {
-  NORMAL,
-  LIGHT,
-  ALARM,
-  TIMER,
-  SETTIME,
-  CNT
-};
-
-int mode = NORMAL;
-byte system_flags = 0b00000010;
 #define FLAG_UPDATE (1 << 0)
-#define FLAG_LED    (1 << 1)
-#define FLAG_DATE   (1 << 2)
-#define FLAG_12HR   (1 << 3)
-
-
+#define FLAG_CLOCK  (1 << 1)
+#define FLAG_LED    (1 << 2)
+#define FLAG_DATE   (1 << 3)
+#define FLAG_12HR   (1 << 4)
+#define FLAG_ALM    (1 << 5)
+#define FLAG_BUZZ   (1 << 6)
+byte system_flags = 0b00000110;
 
 /**************************************************************************/
 /* PWM INTERRUPT */
+
+float dutyCycle = 1;
+
 void timer_setup()
-{
-  // close interrupt
-  cli();
+{ 
+  cli(); // close interrupt
   
-  // disable compare output mode for OCnA, OCnB, OCnC
+  /* disable compare output mode for OCnA, OCnB, OCnC */
   TCCR1A = 0;
   TCCR1B = 0;
-//  // CTC mode, clear timer on compare
-//  TCCR1B |= (1 << WGM12);
-  // set prescaler to 1
-  TCCR1B |= (1 << CS10);
+ 
+  TCCR1B |= (1 << CS10); // set prescaler to 1
+  
   // timer overflow second formula: 65536 / (16,000,000 / prescaler)
-  // formula: duty_cycle * 65536
-  OCR1A = 1 * 65535;
-  // reset timer counter
-  TCNT1 = 0;
+  // formula: duty_cycle * 65536 
+  OCR1A = dutyCycle * 65535;
+  
+  TCNT1 = 0; // reset timer counter
+  
   // set interrupt mask for TIMER1_COMPA_vect and TIMER1_OVF_vect
   TIMSK1 = (1 << OCIE1A) | (1 << TOIE1);
   
-  //open interrupt
-  sei();
+  sei(); //open interrupt
 }
 
 ISR(TIMER1_COMPA_vect){
@@ -68,24 +62,106 @@ ISR(TIMER1_OVF_vect){
 
 
 /**************************************************************************/
+/* MODE */
+
+enum SYSTEM_MODE {
+  NORMAL,
+  LIGHT,
+  ALARM,
+  TIMER,
+  SETTIME,
+  SYS_MODE_CNT
+};
+
+int mode = NORMAL;
+/**************************************************************************/
+
+
+
+/**************************************************************************/
+/* SUB MODE */
+
+enum SET_LIGHT_MODE {
+  SET_NIXIE,
+  SET_LED_H,
+  SET_LED_S,
+  SET_LED_V,
+  SET_LIGHT_CNT
+};
+
+enum SET_ALM_MODE {
+  SET_ALM_H,
+  SET_ALM_M,
+  SET_ALM_CNT
+};
+
+enum SET_TIME_MODE {
+  SET_TIME_SEC,
+  SET_TIME_HR,
+  SET_TIME_MIN,
+  SET_TIME_Y,
+  SET_TIME_MON,
+  SET_TIME_D,
+  SET_TIME_CNT
+};
+
+int subMode = 0;
+/**************************************************************************/
+
+
+
+/**************************************************************************/
 /* BUTTON INTERRUPT */
 
 void button_setup() {
-  /* set PB2,4,5,6 as input */
-  DDRB &= ~(1 << PB2 | 1 << PB4 | 1 << PB5 | 1 << PB6);
+  /* set PB2,3,4,5,6 as input */
+  DDRB &= ~(1 << PB2 | 1 << PB4 | 1 << PB5 | 1 << PB6 | 1 << PB1 | 1 << PB3);
   DDRE |= 1 << PE6;     // set PE6 as output
   PORTE &= ~(1 << PE6); // output low
 
   PCICR |= 1 << PCIE0;  // enable pin change interrupt 0
   PCIFR |= 1 << PCIF0;  // clear interrupt flag bit
-  PCMSK0 |= 0b01110100; // enable PCINT2,4,5,6
+  PCMSK0 |= 0b01111100; // enable PCINT2,3,4,5,6
 }
 
+int aLastState = 0;
+
 ISR(PCINT0_vect){
-  #define DEBOUNCE_DELAY 10
+
+  /* for rotary encoder */
+  static const byte MASK_RT_A = (1 << PB3);
+  static const byte MASK_RT_B = (1 << PB1);
 
   static byte buttonPressed = 0;
 
+  int aState = !!(PINB & MASK_RT_A);
+
+  if (aState != aLastState) {
+    int bState = !!(PINB & MASK_RT_B);
+    (bState != aState) ? rotateCW(true) : rotateCW(false);
+  }
+  
+  aLastState = aState;
+
+
+
+//  static byte buttonPressed = 0;
+//
+//  /* PINB stores which pin has input */
+//  byte stateChange = buttonPressed ^ PINB;
+//
+//  int aState = !!(PINB & MASK_RT_A);
+//
+//  if (stateChange & MASK_RT_A) {
+//    (((PINB >> PB3) ^ (PINB >> PB1)) & 1)?
+//      rotateCW() : rotateCCW();
+//  }
+  
+
+
+  /* for button */
+  #define DEBOUNCE_DELAY 10
+  
   static unsigned long TIME_BTN_MODE = 0;
   static unsigned long TIME_BTN_LIGHT = 0;
   static unsigned long TIME_BTN_START = 0;
@@ -103,7 +179,7 @@ ISR(PCINT0_vect){
   if ((stateChange & MASK_BTN_MODE) && millis() - TIME_BTN_MODE >= DEBOUNCE_DELAY) {
     buttonPressed ^= MASK_BTN_MODE;
     if (buttonPressed & MASK_BTN_MODE) {
-      ++mode %= CNT;
+      btn_MODE_press();
     }
     else {
       // NOP
@@ -158,6 +234,14 @@ ISR(PCINT0_vect){
 
 RTC_DS3231 rtc;
 DateTime currentTime;
+
+inline void rtc_setup() {
+  rtc.begin();
+  currentTime = rtc.now();
+
+  /* need to call adjust() if RTC is used for the first time */
+  rtc.adjust(DateTime(2021, 4, 23, 21, 45, 0));
+}
 
 /*
  * Update [numberToDisplay] to current time (hr, min, sec) every second
@@ -229,14 +313,6 @@ inline void updateDate() {
     #endif
   }
 }
-
-inline void rtc_setup() {
-  rtc.begin();
-  currentTime = rtc.now();
-
-  /* need to call adjust() if RTC is used for the first time */
-  rtc.adjust(DateTime(2021, 4, 23, 21, 45, 0));
-}
 /**************************************************************************/
 
 
@@ -251,7 +327,14 @@ inline void rtc_setup() {
 
 #define LED_PIN 7
 CRGB leds[IC_COUNT];
-CHSV ledColor = CHSV(208.0 / 360 * 255, 89.0 / 100 * 255, 60);
+
+/*
+ * formula for normal HSV mapping to CHSV
+ * CH = H / 360 * 255
+ * CS = S / 100 * 255
+ * CV = V / 100 * 255
+ */
+CHSV ledColor(147, 227, 60);
 
 inline void led_setup() {
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, IC_COUNT);
@@ -265,16 +348,34 @@ inline void led_setup() {
 /**************************************************************************/
 /* BUTTON ACTIONS */
 
+inline void btn_MODE_press() {
+  ++mode %= SYS_MODE_CNT;
+  subMode = 0;
+  
+  switch (mode) {
+  case LIGHT:
+    system_flags &= ~FLAG_CLOCK;
+    memset(numberToDisplay, 0, IC_COUNT);
+    break;
+
+  case ALARM:
+    if (system_flags & FLAG_LED)
+      fill_solid(leds, IC_COUNT, ledColor);
+    else
+      fill_solid(leds, IC_COUNT, CRGB(0,0,0));
+    FastLED.show();
+    break;
+  }
+}
+
 inline void btn_LIGHT_press() {
   switch (mode) {
   case NORMAL:
     system_flags ^= FLAG_LED;
-    if (system_flags & FLAG_LED) {
+    if (system_flags & FLAG_LED)
       fill_solid(leds, IC_COUNT, ledColor);
-    }
-    else {
+    else
       fill_solid(leds, IC_COUNT, CRGB(0,0,0));
-    }
     FastLED.show();
     break;
   }
@@ -289,6 +390,28 @@ inline void btn_START_press() {
   }
 }
 
+inline void btn_RESET_press() {
+  switch (mode) {
+  case NORMAL:
+    system_flags ^= FLAG_12HR;
+    system_flags |= FLAG_UPDATE;
+    break;
+
+  case LIGHT:
+    ++subMode %= SET_LIGHT_CNT;
+    
+    if (subMode == SET_NIXIE)
+      system_flags &= ~FLAG_CLOCK;
+    else
+      system_flags |= FLAG_CLOCK;    
+    break;
+  }
+
+  leds[0] = ledColor;
+  FastLED.show();
+}
+
+
 inline void btn_START_release() {
   switch (mode) {
   case NORMAL:
@@ -297,20 +420,97 @@ inline void btn_START_release() {
     break;
   }
 }
+/**************************************************************************/
 
-inline void btn_RESET_press() {
+
+
+/**************************************************************************/
+/* ROTARTY ENCODER ACTIONS */
+
+inline void rotateCW(bool clockwise = true) {
+
+  int sign = (clockwise)? 1 : -1;
+  
   switch (mode) {
-  case NORMAL:
-    system_flags ^= FLAG_12HR;
-    system_flags |= FLAG_UPDATE;
+
+  /*** LIGHT MODE ***/
+  case LIGHT:
+    switch (subMode) {
+   
+    case SET_NIXIE:
+      /*
+       * Multiply dutyCycle(nixie tube's brightness) by 1.05 or 0.95.
+       * Use multiply instead of add will look more instinctively for human.
+       */
+      dutyCycle *= (20 + sign) * 0.05;
+      if (dutyCycle > 0.95) dutyCycle = 1;
+      if (dutyCycle <= 0.05 ) dutyCycle = 0.05;
+      OCR1A = dutyCycle * 65535;
+      return;
+
+    case SET_LED_H:
+      ledColor.h += sign;
+      break;
+
+    case SET_LED_S:
+      ledColor.s += 3 * sign;
+      break;
+
+    case SET_LED_V:
+      ledColor.v += sign;
+      break;
+    }
+
+    /*
+     * FastLED.show() will be executed in circleLight(),
+     * since circleLight() is repeatedly called in LIGHT mode.
+     * Although executing show() here should only be a waste of time,
+     * doing it here will froze the system for unknown reason.
+     */
+    fill_solid(leds, IC_COUNT, ledColor);
     break;
-  }
+  } 
+  
 }
 /**************************************************************************/
 
 
 
+inline void circleLight() {
+  if (mode != LIGHT) return;
+  
+  static byte circular = 0;
+  circular += 10;
+    
+  switch (subMode) {
+  case SET_NIXIE:
+    SET_INTERVAL(500, [] {
+      static byte cnt = 1;
+      memset(numberToDisplay, cnt, IC_COUNT);
+      ++cnt %= 10;
+    });
+    return;
+  
+  case SET_LED_H:
+    leds[0] = CHSV(circular, ledColor.s, ledColor.v);
+    break;
+
+  case SET_LED_S:
+    leds[0] = CHSV(ledColor.h, circular, ledColor.v);
+    break;
+
+  case SET_LED_V:
+    leds[0] = CHSV(ledColor.h, ledColor.s, circular);
+    break;
+  }
+
+  FastLED.show();
+}
+
 inline void updateClock() {
+  if (!(system_flags & FLAG_CLOCK))
+    return;
+    
   if (system_flags & FLAG_DATE) {
     updateDate();
   }
@@ -319,7 +519,9 @@ inline void updateClock() {
   }
 }
 
-void setup() {    
+void setup() {
+  Serial.begin(9600);
+   
   timer_setup();
   
   register_setup();
@@ -329,6 +531,7 @@ void setup() {
 }
 
 void loop() {
+    
   /* update clock instantly (when ISR is called) */
   if (system_flags & FLAG_UPDATE) {  
     updateClock();
@@ -337,5 +540,9 @@ void loop() {
   }
 
   /* update clock every 100ms */
-  SET_INTERVAL(100, updateClock);
+  SET_INTERVAL(100, [] {
+    updateClock();
+    if (mode == LIGHT)
+      circleLight();
+  });
 }
