@@ -13,6 +13,8 @@
 #define SH_CP 6
 #define DS    4
 
+#define NO_LIGHT 15;
+
 #ifdef __AVR_ATmega32U4__
 
 #define MSDATAHIGH  PORTD |=  (1 << PD4)
