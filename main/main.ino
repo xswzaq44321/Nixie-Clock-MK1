@@ -17,7 +17,7 @@ byte rollNumber[IC_COUNT] = {0};
 #define FLAG_12HR (1 << 1)
 #define FLAG_ALM  (1 << 2)
 #define FLAG_TMR  (1 << 3)
-byte settings = 0b0101;
+byte settings;
 
 #define MD_UPDATE (1 << 0)
 #define MD_CLOCK  (1 << 1)
@@ -26,6 +26,22 @@ byte settings = 0b0101;
 #define MD_SYNC   (1 << 4)
 #define MD_ROLL   (1 << 5)
 byte system_mode = 0b00000011;
+/**************************************************************************/
+
+
+
+/**************************************************************************/
+/* EEPROM */
+#include <EEPROMWearLevel.h>
+
+#define EEPROM_LAYOUT_VERSION 0
+#define ADDR_ALARM_H  0
+#define ADDR_ALARM_M  1
+#define ADDR_LED_H    2
+#define ADDR_LED_S    3
+#define ADDR_LED_V    4
+#define ADDR_SETTING  5
+#define AMOUNT_OF_INDEXES 6
 /**************************************************************************/
 
 
@@ -156,40 +172,16 @@ void button_setup() {
   PCMSK0 |= 0b01111100; // enable PCINT2,3,4,5,6
 }
 
-int aLastState = 0;
-
 ISR(PCINT0_vect) {
 
-  /* for rotary encoder */
-  static const byte MASK_RT_A = (1 << PB3);
-  static const byte MASK_RT_B = (1 << PB1);
-
-  static byte buttonPressed = 0;
-
-  int aState = !!(PINB & MASK_RT_A);
-
+  /* rotary encoder */
+  static bool aLastState = false;
+  bool aState = !!(PINB & (1 << PB3));
   if (aState != aLastState) {
-    int bState = !!(PINB & MASK_RT_B);
-    (bState != aState) ? rotateCW(true) : rotateCW(false);
+    bool bState = !!(PINB & (1 << PB1));
+    rotateCW(bState != aState);
   }
-
   aLastState = aState;
-
-
-
-  //  static byte buttonPressed = 0;
-  //
-  //  /* PINB stores which pin has input */
-  //  byte stateChange = buttonPressed ^ PINB;
-  //
-  //  int aState = !!(PINB & MASK_RT_A);
-  //
-  //  if (stateChange & MASK_RT_A) {
-  //    (((PINB >> PB3) ^ (PINB >> PB1)) & 1)?
-  //      rotateCW() : rotateCCW();
-  //  }
-
-
 
   /* for button */
 #define DEBOUNCE_DELAY 10
@@ -205,6 +197,7 @@ ISR(PCINT0_vect) {
   static const byte MASK_BTN_RESET = 1 << PB2;
 
   /* PINB stores which pin has input */
+  static byte buttonPressed = 0;
   byte stateChange = buttonPressed ^ PINB;
 
   /* button MODE */
@@ -528,8 +521,6 @@ CHSV ledColor(147, 227, 60);
 
 inline void led_setup() {
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, IC_COUNT);
-  fill_solid(leds, IC_COUNT, ledColor);
-  FastLED.show();
 
   pinMode(LED_ALARM, OUTPUT);
   pinMode(LED_TIMER, OUTPUT);
@@ -681,13 +672,18 @@ inline void btn_MODE_press() {
     memset(numberToDisplay, 0, IC_COUNT);
     break;
 
-  case ALARM:
+  case ALARM:    
     system_mode &= ~MD_CLOCK;
     system_mode |= MD_UPDATE;
+    
     if (settings & FLAG_LED)
       fill_solid(leds, IC_COUNT, ledColor);
     else
       fill_solid(leds, IC_COUNT, CRGB(0, 0, 0));
+
+    EEPROMwl.update(ADDR_LED_H, ledColor.h);
+    EEPROMwl.update(ADDR_LED_S, ledColor.s);
+    EEPROMwl.update(ADDR_LED_V, ledColor.v);
 
     SET_HR(alarm_h);
     SET_MIN(alarm_m);
@@ -720,6 +716,7 @@ inline void btn_LIGHT_press() {
   switch (mode) {
   case NORMAL:
     settings ^= FLAG_LED;
+    EEPROMwl.update(ADDR_SETTING, settings);
     if (settings & FLAG_LED)
       fill_solid(leds, IC_COUNT, ledColor);
     else
@@ -729,7 +726,7 @@ inline void btn_LIGHT_press() {
 
   case ALARM:
     if (subMode == SET_ALM_ON)
-      settings ^= MD_BUZZ;
+      system_mode ^= MD_BUZZ;
     else
       addTimeOnDisplay(-1);
     break;
@@ -752,6 +749,7 @@ inline void btn_START_press() {
   case ALARM:
     if (subMode == SET_ALM_ON) {
       settings ^= FLAG_ALM;
+      EEPROMwl.update(ADDR_SETTING, settings);
       digitalWrite(LED_ALARM, settings & FLAG_ALM);
     }
     else
@@ -775,6 +773,7 @@ inline void btn_RESET_press() {
   /*** NORMAL MODE -> BUTTON RESEST ***/
   case NORMAL:
     settings ^= FLAG_12HR;
+    EEPROMwl.update(ADDR_SETTING, settings);
     system_mode |= MD_UPDATE;
     break;
 
@@ -892,24 +891,40 @@ inline void updateTime() {
     updateHMS();
 }
 
-void setup() {
-
+void setup() { 
   for (int i = 1; i < IC_COUNT; ++i)
     rollNumber[i] = (rollNumber[i - 1] + 7) % 10;
+
+  EEPROMwl.begin(EEPROM_LAYOUT_VERSION, AMOUNT_OF_INDEXES);
+
+  settings = EEPROMwl.read(ADDR_SETTING);
   
   timer_setup();
 
   register_setup();
+  
   rtc_setup();
+  alarm_h = EEPROMwl.read(ADDR_ALARM_H);
+  alarm_m = EEPROMwl.read(ADDR_ALARM_M);
+  
   button_setup();
+  
   led_setup();
+  byte h = EEPROMwl.read(ADDR_LED_H);
+  byte s = EEPROMwl.read(ADDR_LED_S);
+  byte v = EEPROMwl.read(ADDR_LED_V);
+  ledColor = CHSV(h, s, v);
+  if (settings & FLAG_LED)
+    fill_solid(leds, IC_COUNT, ledColor);
+  else
+    fill_solid(leds, IC_COUNT, CRGB(0, 0, 0));
+  FastLED.show();
 
   digitalWrite(LED_ALARM, settings & FLAG_ALM);
   digitalWrite(LED_TIMER, settings & FLAG_TMR);
 }
 
 void loop() {
-
   if (rtc.now().minute() % 10 == 0 && rtc.now().second() == 0) {
     SET_INTERVAL(1005, [] {     
       system_mode |= MD_ROLL;
@@ -924,10 +939,14 @@ void loop() {
 
   /* update clock instantly (when ISR is called) */
   if (system_mode & MD_UPDATE) {
-    updateTime();
+    if (system_mode & MD_CLOCK)
+      updateTime();
+      
     FastLED.show();
-    rtc.setAlarm1(DateTime(0, 0, 0, alarm_h, alarm_m, 0), DS3231_A1_Hour);
     
+    rtc.setAlarm1(DateTime(0, 0, 0, alarm_h, alarm_m, 0), DS3231_A1_Hour);
+    EEPROMwl.update(ADDR_ALARM_H, alarm_h);
+    EEPROMwl.update(ADDR_ALARM_M, alarm_m);
     system_mode &= ~MD_UPDATE;
     return;
   }
