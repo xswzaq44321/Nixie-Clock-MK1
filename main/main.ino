@@ -35,13 +35,17 @@ byte system_mode = 0b00000011;
 #include <EEPROMWearLevel.h>
 
 #define EEPROM_LAYOUT_VERSION 0
+
 #define ADDR_ALARM_H  0
 #define ADDR_ALARM_M  1
 #define ADDR_LED_H    2
 #define ADDR_LED_S    3
 #define ADDR_LED_V    4
 #define ADDR_SETTING  5
-#define AMOUNT_OF_INDEXES 6
+#define ADDR_OCR1A_H  6
+#define ADDR_OCR1A_L  7
+
+#define AMOUNT_OF_INDEXES 8
 /**************************************************************************/
 
 
@@ -49,7 +53,7 @@ byte system_mode = 0b00000011;
 /**************************************************************************/
 /* PWM INTERRUPT */
 
-float dutyCycle = 1;
+float dutyCycle;
 
 void timer_setup()
 {
@@ -76,7 +80,7 @@ void timer_setup()
 }
 
 ISR(TIMER1_COMPA_vect) {
-  if (system_mode & MD_ROLL)
+  if (dutyCycle == 1 || system_mode & MD_ROLL)
     return;
   
   emptyDisplay();
@@ -685,6 +689,9 @@ inline void btn_MODE_press() {
     EEPROMwl.update(ADDR_LED_S, ledColor.s);
     EEPROMwl.update(ADDR_LED_V, ledColor.v);
 
+    EEPROMwl.update(ADDR_OCR1A_H, (byte)(0xFF & (OCR1A >> 8)));
+    EEPROMwl.update(ADDR_OCR1A_L, (byte)(0xFF & OCR1A));
+
     SET_HR(alarm_h);
     SET_MIN(alarm_m);
     SET_SEC(0);
@@ -900,6 +907,10 @@ void setup() {
   settings = EEPROMwl.read(ADDR_SETTING);
   
   timer_setup();
+  int high = EEPROMwl.read(ADDR_OCR1A_H);
+  OCR1A |= high << 8;
+  OCR1A |= EEPROMwl.read(ADDR_OCR1A_L);
+  dutyCycle = OCR1A / 65535.0;
 
   register_setup();
   
