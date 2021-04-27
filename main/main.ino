@@ -3,20 +3,29 @@
 #include "buzzer.h"
 
 void rotateCW(bool);
-void addTime(int);
+void addTimeOnDisplay(int);
+void adjustTime(int);
+byte daysOfMonth(byte mon, int y);
+
 byte numberToDisplay[IC_COUNT];
+byte rollNumber[IC_COUNT] = {0};
 
 /**************************************************************************/
 /* SYSTEM FLAGS */
-#define FLAG_UPDATE (1 << 0)
-#define FLAG_CLOCK  (1 << 1)
-#define FLAG_LED    (1 << 2)
-#define FLAG_DATE   (1 << 3)
-#define FLAG_12HR   (1 << 4)
-#define FLAG_ALM    (1 << 5)
-#define FLAG_BUZZ   (1 << 6)
-#define FLAG_TMR    (1 << 7)
-byte system_flags = 0b00100111;
+
+#define FLAG_LED  (1 << 0)
+#define FLAG_12HR (1 << 1)
+#define FLAG_ALM  (1 << 2)
+#define FLAG_TMR  (1 << 3)
+byte settings = 0b0101;
+
+#define MD_UPDATE (1 << 0)
+#define MD_CLOCK  (1 << 1)
+#define MD_DATE   (1 << 2)
+#define MD_BUZZ   (1 << 3)
+#define MD_SYNC   (1 << 4)
+#define MD_ROLL   (1 << 5)
+byte system_mode = 0b00000011;
 /**************************************************************************/
 
 
@@ -35,9 +44,11 @@ void timer_setup()
   TCCR1B = 0;
 
   TCCR1B |= (1 << CS10); // set prescaler to 1
-
-  // timer overflow second formula: 65536 / (16,000,000 / prescaler)
-  // formula: duty_cycle * 65536
+  
+  /*
+   * timer overflow second formula: 65536 / (16,000,000 / prescaler)
+   * formula: duty_cycle * 65536
+   */
   OCR1A = dutyCycle * 65535;
 
   TCNT1 = 0; // reset timer counter
@@ -49,10 +60,29 @@ void timer_setup()
 }
 
 ISR(TIMER1_COMPA_vect) {
+  if (system_mode & MD_ROLL)
+    return;
+  
   emptyDisplay();
 }
 
 ISR(TIMER1_OVF_vect) {
+  
+  static byte roll_cnt = 0;
+
+  if (system_mode & MD_ROLL) {
+    if (++roll_cnt < 10) {
+      for (int i = 0; i < IC_COUNT; ++i)
+        rollNumber[i] = (rollNumber[i] + 3) % 10;
+      pushData(rollNumber);   
+    }
+    else {
+      roll_cnt = 0;
+      system_mode &= ~MD_ROLL;
+    }
+    return;
+  }
+
   pushData(numberToDisplay);
 }
 /**************************************************************************/
@@ -231,13 +261,20 @@ ISR(PCINT0_vect) {
 
 
 /**************************************************************************/
-/* RTC */
+/* TIME */
 #include "RTClib.h"
 
 RTC_DS3231 rtc;
 DateTime currentTime;
 byte alarm_h = 22;
 byte alarm_m = 30;
+
+byte adjust_hr  = 0;
+byte adjust_min = 0;
+int  adjust_y   = 0;
+byte adjust_mon = 0;
+byte adjust_d   = 0;
+byte adjust_s   = 0;
 
 inline void rtc_setup() {
   rtc.begin();
@@ -342,100 +379,130 @@ do {\
     numberToDisplay[i] = NO_LIGHT;\
 } while(0)
 
+byte inline daysOfMonth(byte mon, int y) {
+  switch (mon) {
+  case 1: case 3: case 5: case 7: case 8: case 10: case 12:
+    return 31;
+    
+  case 4: case 6: case 9: case 11:
+    return 30;
+    
+  case 2:
+    if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)
+      return 29;
+    else
+      return 28;
+      
+  default:
+    return -1;
+  }
+}
+
 /*
    Update [numberToDisplay] to current time (hr, min, sec) every second
-   or FLAG_UPDATE is on.
+   or MD_UPDATE is on.
    Will NOT push data to nixie tube.
    Set PM to true to update to 12-hour clock.
 */
-inline void updateHMS(bool PM = false) {
+inline void updateHMS() {
   DateTime tmp_t = rtc.now();
 
-  if (system_flags & FLAG_UPDATE || tmp_t.second() != currentTime.second()) {
-    currentTime = tmp_t;
+  if (system_mode & MD_UPDATE || tmp_t.second() != currentTime.second()) {
 
-    /* turn 24-hour clock to 12-hour clock */
-    int tmp_hour = currentTime.hour();
-    if (PM && tmp_hour > 12)
-      tmp_hour -= 12;
+    if (system_mode & MD_SYNC) {
+      system_mode &= ~MD_SYNC;
+      currentTime = DateTime(
+                      currentTime.year() + adjust_y,
+                      (currentTime.month() + adjust_mon - 1) % 12 + 1,
+                      (currentTime.day() + adjust_d - 1) % 31 + 1,
+                      (currentTime.hour() + adjust_hr) % 24,
+                      (currentTime.minute() + adjust_min) % 60,
+                      adjust_s
+                    );
+      rtc.adjust(currentTime);
+      adjust_s = adjust_y = adjust_mon = adjust_d = adjust_hr = adjust_min = 0;
+    }
+    else {
+      currentTime = tmp_t;
+    } 
 
-    SET_HR(tmp_hour);
-    SET_MIN(currentTime.minute());
+    byte tmp_hr = currentTime.hour() + adjust_hr;
+    tmp_hr %= (settings & FLAG_12HR)? 12 : 24;
+    
+    byte tmp_min = (currentTime.minute() + adjust_min) % 60;
+
+    SET_HR(tmp_hr);
+    SET_MIN(tmp_min);
     SET_SEC(currentTime.second());
   }
 }
 
 /*
    Update [numberToDisplay] to current date if the date changes
-   or FLAG_UPDATE is on.
+   or MD_UPDATE is on.
    Will NOT push data to nixie tube.
 */
 inline void updateDate() {
   DateTime tmp_t = rtc.now();
-  if (system_flags & FLAG_UPDATE || tmp_t.day() != currentTime.day()) {
+  if (system_mode & MD_UPDATE || tmp_t.day() != currentTime.day()) {
     currentTime = tmp_t;
 
-    SET_YEAR(currentTime.year());
-    SET_MONTH(currentTime.month());
-    SET_DAY(currentTime.day());
+    byte tmp_y = currentTime.year() + adjust_y;
+    byte tmp_mon = (currentTime.month() + adjust_mon - 1) % 12 + 1;
+    byte tmp_d = (currentTime.day() + adjust_d  - 1) % 31 + 1;
+
+    SET_YEAR(tmp_y);
+    SET_MONTH(tmp_mon);
+    SET_DAY(tmp_d);
   }
 }
 
-inline void flickClock() {
+/*
+ * addTimeOnDisplay will only adjust the time in numberToDisplay.
+ * It will NOT adjust time in RTC.
+ */
+void addTimeOnDisplay(int t) {   
+  switch (subMode) {
+    
+  case SET_ALM_M:
+    alarm_m = (alarm_m + 60 + t) % 60;
+    SET_MIN(alarm_m);
+    break;
+    
+  case SET_ALM_H:
+    alarm_h = (alarm_h + 24 + t) % 24;
+    SET_HR(alarm_h);
+    break;   
+  }
+}
 
-  if (subMode == SET_ALM_ON)
-    return;
+void adjustTime(int t) {
+  system_mode |= MD_UPDATE;
+  
+  switch (subMode) {
+    
+  case SET_TIME_HR:
+    adjust_hr = (adjust_hr + 24 + t) % 24;
+    break;
+    
+  case SET_TIME_MIN:
+    adjust_min = (adjust_min + 60 + t) % 60;
+    break;
 
-  #define PERIOD 700    // period of nixie tube flickering
-  #define ON_TIME  500  // time of nixie tube being on in a period
-  static_assert(PERIOD > ON_TIME, "FLICK_TIME should be greater then DARK_TIME");
+  case SET_TIME_Y:
+    adjust_y += t;
+    break;
 
-  static unsigned long waitStart = millis() + PERIOD;
-  SET_INTERVAL(PERIOD, [] {
-    switch (subMode) {
-    case SET_ALM_H:
-      SET_HR(alarm_h);
-      break;
+  case SET_TIME_MON:
+    adjust_mon = (adjust_mon + 12 + t) % 12;
+    break;
 
-    case SET_ALM_M:
-      SET_MIN(alarm_m);
-      break;
-    }
-    waitStart = millis();
-  });
-
-  if (millis() - waitStart >= ON_TIME) {   
-    switch (subMode) {
-    case SET_ALM_H:
-      CLR_HR();
-      break;
-
-    case SET_ALM_M:
-      CLR_MIN();
-      break;
-    }
+  case SET_TIME_D:
+    adjust_d = (adjust_d + 31 + t) % 31;
+    break;
   }
   
 }
-
-void addTime(int t) {
-  if (mode == ALARM) {
-    switch (subMode) {
-    case SET_ALM_M:
-      alarm_m = (alarm_m + t) % 60;
-      SET_MIN(alarm_m);
-      break;
-    case SET_ALM_H:
-      alarm_h = (alarm_h + t) % 24;
-      SET_HR(alarm_h);
-      break;
-    }
-  }
-  else if (mode == SETTIME) {
-    
-  }
-}
-
 /**************************************************************************/
 
 
@@ -467,8 +534,14 @@ inline void led_setup() {
   pinMode(LED_ALARM, OUTPUT);
   pinMode(LED_TIMER, OUTPUT);
 }
+/**************************************************************************/
 
-inline void circleLight() {
+
+
+/**************************************************************************/
+/* MODE INDICATOR */
+
+inline void md_LIGHT_indicate() {
   if (mode != LIGHT) return;
 
   static byte circular = 0;
@@ -495,6 +568,90 @@ inline void circleLight() {
     leds[0] = CHSV(ledColor.h, ledColor.s, circular);
     break;
   }
+
+  FastLED.show();
+}
+
+#define PERIOD    700 // period of nixie tube flickering
+#define OFF_TIME  200 // time of nixie tube being off in a period
+
+inline void md_ALARM_indicate() {
+
+  static_assert(PERIOD > OFF_TIME,
+    "PERIOD should be greater then OFF_TIME");
+
+  if (subMode == SET_ALM_ON)
+    return;
+
+  static unsigned long waitStart = millis() + PERIOD;
+  SET_INTERVAL(PERIOD, [] {
+    switch (subMode) {
+    case SET_ALM_H:
+      CLR_HR();
+      break;
+
+    case SET_ALM_M:
+      CLR_MIN();
+      break;
+    }
+    waitStart = millis();
+  });
+
+  if (millis() - waitStart >= OFF_TIME) {   
+    switch (subMode) {
+    case SET_ALM_H:
+      SET_HR(alarm_h);
+      break;
+
+    case SET_ALM_M:
+      SET_MIN(alarm_m);
+      break;
+    }
+  }
+}
+
+inline void md_SETTIME_indicate() {
+
+  static_assert(PERIOD > OFF_TIME,
+    "PERIOD should be greater then OFF_TIME");
+
+  static unsigned long waitStart = millis() + PERIOD;
+  
+  SET_INTERVAL(PERIOD, [] {
+    system_mode &= ~MD_CLOCK;
+    
+    switch (subMode) {
+    case SET_TIME_SEC:
+      CLR_SEC();
+      break;
+
+    case SET_TIME_HR:
+      CLR_HR();
+      break;
+
+    case SET_TIME_MIN:
+      CLR_MIN();
+      break;
+
+    case SET_TIME_Y:
+      CLR_YEAR();
+      break;
+
+    case SET_TIME_MON:
+      CLR_MONTH();
+      break;
+
+    case SET_TIME_D:
+      CLR_DAY();
+      break;
+    }
+    waitStart = millis();
+  });
+
+  if (millis() - waitStart >= OFF_TIME) {
+    system_mode |= MD_CLOCK;
+    system_mode |= MD_UPDATE;
+  }
 }
 /**************************************************************************/
 
@@ -504,28 +661,33 @@ inline void circleLight() {
 /* BUTTON ACTIONS */
 
 inline void btn_MODE_press() {
-  system_flags &= ~FLAG_BUZZ;
+  system_mode &= ~MD_BUZZ;
   
   ++mode %= SYS_MODE_CNT;
   subMode = 0;
 
   switch (mode) {
   case NORMAL:
-    system_flags |= FLAG_CLOCK;
+    system_mode |= MD_CLOCK;
+    system_mode &= ~MD_DATE;
+
+    adjust_s = currentTime.second();
+    system_mode |= MD_SYNC;
+    system_mode |= MD_UPDATE;
     break;
 
   case LIGHT:
-    system_flags &= ~FLAG_CLOCK;
+    system_mode &= ~MD_CLOCK;
     memset(numberToDisplay, 0, IC_COUNT);
     break;
 
   case ALARM:
-    system_flags &= ~FLAG_CLOCK;
-    if (system_flags & FLAG_LED)
+    system_mode &= ~MD_CLOCK;
+    system_mode |= MD_UPDATE;
+    if (settings & FLAG_LED)
       fill_solid(leds, IC_COUNT, ledColor);
     else
       fill_solid(leds, IC_COUNT, CRGB(0, 0, 0));
-    system_flags |= FLAG_UPDATE;
 
     SET_HR(alarm_h);
     SET_MIN(alarm_m);
@@ -534,9 +696,9 @@ inline void btn_MODE_press() {
     break;
 
   case TIMER:
-    system_flags &= ~FLAG_CLOCK;
+    system_mode &= ~MD_CLOCK;
     digitalWrite(LED_TIMER, HIGH);
-    if (system_flags & FLAG_TMR) {
+    if (settings & FLAG_TMR) {
       
     }
     else {
@@ -545,7 +707,7 @@ inline void btn_MODE_press() {
     break;
 
   case SETTIME:
-    system_flags |= FLAG_CLOCK;
+    system_mode |= MD_CLOCK;
     digitalWrite(LED_TIMER, LOW);
     break;
   }
@@ -553,56 +715,67 @@ inline void btn_MODE_press() {
 
 inline void btn_LIGHT_press() {
   if (mode != ALARM)
-    system_flags &= ~FLAG_BUZZ;
+    system_mode &= ~MD_BUZZ;
   
   switch (mode) {
   case NORMAL:
-    system_flags ^= FLAG_LED;
-    if (system_flags & FLAG_LED)
+    settings ^= FLAG_LED;
+    if (settings & FLAG_LED)
       fill_solid(leds, IC_COUNT, ledColor);
     else
       fill_solid(leds, IC_COUNT, CRGB(0, 0, 0));
-    system_flags |= FLAG_UPDATE;
+    system_mode |= MD_UPDATE;
     break;
 
   case ALARM:
     if (subMode == SET_ALM_ON)
-      system_flags ^= FLAG_BUZZ;
+      settings ^= MD_BUZZ;
     else
-      addTime(-1);
+      addTimeOnDisplay(-1);
+    break;
+
+  case SETTIME:
+    adjustTime(-1);
     break;
   }
 }
 
 inline void btn_START_press() {
-  system_flags &= ~FLAG_BUZZ;
+  system_mode &= ~MD_BUZZ;
   
   switch (mode) {
   case NORMAL:
-    system_flags |= FLAG_DATE;
-    system_flags |= FLAG_UPDATE;
+    system_mode |= MD_DATE;
+    system_mode |= MD_UPDATE;
     break;
 
   case ALARM:
     if (subMode == SET_ALM_ON) {
-      system_flags ^= FLAG_ALM;
-      digitalWrite(LED_ALARM, system_flags & FLAG_ALM);
+      settings ^= FLAG_ALM;
+      digitalWrite(LED_ALARM, settings & FLAG_ALM);
     }
     else
-      addTime(1);
+      addTimeOnDisplay(1);
+    break;
+
+  case SETTIME:
+    if (subMode == SET_TIME_SEC)
+      system_mode |= MD_SYNC;
+    else
+      adjustTime(1);
     break;
   }
 }
 
 inline void btn_RESET_press() {
-  system_flags &= ~FLAG_BUZZ;
+  system_mode &= ~MD_BUZZ;
   
   switch (mode) {
 
   /*** NORMAL MODE -> BUTTON RESEST ***/
   case NORMAL:
-    system_flags ^= FLAG_12HR;
-    system_flags |= FLAG_UPDATE;
+    settings ^= FLAG_12HR;
+    system_mode |= MD_UPDATE;
     break;
 
   /*** LIGHT MODE -> BUTTON RESEST ***/
@@ -610,9 +783,9 @@ inline void btn_RESET_press() {
     ++subMode %= SET_LIGHT_CNT;
 
     if (subMode == SET_NIXIE)
-      system_flags &= ~FLAG_CLOCK;
+      system_mode &= ~MD_CLOCK;
     else
-      system_flags |= FLAG_CLOCK;
+      system_mode |= MD_CLOCK;
 
     /*
       leds[0] is used to indicate what in HSV is being set
@@ -620,7 +793,7 @@ inline void btn_RESET_press() {
       Set leds[0] back to ledColor when switch to next subMode.
     */
     leds[0] = ledColor;
-    system_flags |= FLAG_UPDATE;
+    system_mode |= MD_UPDATE;
     break;
 
   /*** ALARM MODE -> BUTTON RESEST ***/
@@ -630,8 +803,15 @@ inline void btn_RESET_press() {
     SET_HR(alarm_h);
     SET_MIN(alarm_m);
     SET_SEC(0);
-    system_flags |= FLAG_UPDATE;
     break;
+
+  case SETTIME:
+    ++subMode %= SET_TIME_CNT;
+    
+    if (subMode == SET_TIME_SEC)
+      system_mode &= ~MD_DATE;
+    else if (subMode == SET_TIME_Y)
+      system_mode |= MD_DATE;
   }
 
 }
@@ -640,8 +820,8 @@ inline void btn_RESET_press() {
 inline void btn_START_release() {
   switch (mode) {
   case NORMAL:
-    system_flags &= ~FLAG_DATE;
-    system_flags |= FLAG_UPDATE;
+    system_mode &= ~MD_DATE;
+    system_mode |= MD_UPDATE;
     break;
   }
 }
@@ -690,7 +870,12 @@ inline void rotateCW(bool clockwise = true) {
 
   /*** ALARM MODE ***/
   case ALARM:
-    addTime(sign);
+    addTimeOnDisplay(sign);
+    break;
+
+  case SETTIME:
+    if (subMode != SET_TIME_SEC)
+      adjustTime(sign);
     break;
   }
 
@@ -700,18 +885,18 @@ inline void rotateCW(bool clockwise = true) {
 
 
 inline void updateTime() {
-  if (!(system_flags & FLAG_CLOCK))
-    return;
   
-  if (system_flags & FLAG_DATE) {
+  if (system_mode & MD_DATE)
     updateDate();
-  }
-  else {
-    updateHMS(system_flags & FLAG_12HR);
-  }
+  else
+    updateHMS();
 }
 
 void setup() {
+
+  for (int i = 1; i < IC_COUNT; ++i)
+    rollNumber[i] = (rollNumber[i - 1] + 7) % 10;
+  
   timer_setup();
 
   register_setup();
@@ -719,44 +904,53 @@ void setup() {
   button_setup();
   led_setup();
 
-  if (system_flags & FLAG_ALM)
-    digitalWrite(LED_ALARM, HIGH);
+  digitalWrite(LED_ALARM, settings & FLAG_ALM);
+  digitalWrite(LED_TIMER, settings & FLAG_TMR);
 }
 
 void loop() {
 
-  if (system_flags & FLAG_BUZZ) {
-    playMelody();
+  if (rtc.now().minute() % 10 == 0 && rtc.now().second() == 0) {
+    SET_INTERVAL(1005, [] {     
+      system_mode |= MD_ROLL;
+    });
   }
 
+  if (system_mode & MD_ROLL)
+    return;
+
+  if (system_mode & MD_BUZZ)
+    playMelody();
+
   /* update clock instantly (when ISR is called) */
-  if (system_flags & FLAG_UPDATE) {
+  if (system_mode & MD_UPDATE) {
     updateTime();
     FastLED.show();
     rtc.setAlarm1(DateTime(0, 0, 0, alarm_h, alarm_m, 0), DS3231_A1_Hour);
-    system_flags &= ~FLAG_UPDATE;
+    
+    system_mode &= ~MD_UPDATE;
     return;
   }
 
   /* update clock every 100ms */
   SET_INTERVAL(100, [] {
-
-    /* alarm clock */
-    if ((system_flags & FLAG_ALM) && rtc.alarmFired(1)){
+    /* alarm set off */
+    if ((settings & FLAG_ALM) && rtc.alarmFired(1)) {
       restartMelody();
-      system_flags |= FLAG_BUZZ;
+      system_mode |= MD_BUZZ;
       rtc.clearAlarm(1);
     }
 
-    if (system_flags & FLAG_CLOCK)
+    if (system_mode & MD_CLOCK)
       updateTime();
 
-    if (mode == LIGHT) {
-      circleLight();
-      FastLED.show();
-    }
+    if (mode == LIGHT)
+      md_LIGHT_indicate();
 
-    if (mode == ALARM && subMode != SET_ALM_ON)
-      flickClock();
+    if (mode == ALARM)
+      md_ALARM_indicate();
+
+    if (mode == SETTIME)
+      md_SETTIME_indicate();
   });
 }

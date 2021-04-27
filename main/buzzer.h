@@ -1,6 +1,6 @@
 #define SET_INTERVAL(TIME, CALLBACK, ...)\
 do {\
-  static unsigned long t = millis();\
+  static unsigned long t = 0;\
   if(millis() - t >= TIME){\
     CALLBACK(__VA_ARGS__);\
     t = millis();\
