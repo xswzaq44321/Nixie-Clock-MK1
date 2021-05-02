@@ -1,5 +1,6 @@
-/* our PCB can only have 6 or 8 nixie tubes
- * define IC_COUNT_8 if there are 8 nixie tubes
+/* 
+ * Our PCB can only have 6 or 8 nixie tubes.
+ * Define IC_COUNT_8 if there are 8 nixie tubes.
  */
 // #define IC_COUNT_8
 
@@ -8,6 +9,8 @@
 #else
 #define IC_COUNT 6
 #endif
+
+byte numberToDisplay[IC_COUNT];
 
 #define ST_CP 5
 #define SH_CP 6
@@ -52,8 +55,7 @@ static inline void register_setup() {
   pinMode(DS, OUTPUT);
 }
 
-void pushData(byte data[]) {
-
+static inline void __attribute__((optimize("-O3"))) pushData(byte data[]) {
   MSLATCHLOW;
   for (int i = 0; i < IC_COUNT; ++i) {
 
@@ -63,55 +65,127 @@ void pushData(byte data[]) {
      */
     MSCLOCKLOW;
     MSDATALOW;
-    
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
+    for (int j = 0; j < 4; ++j)
+      MSCLOCKFLICK;
 
     /* push the remain 4 bits to register */
-    byte bitMask = 0b1000;
-    byte data_cpy = data[i];
-    MSDATASET(data_cpy & bitMask);
-    MSCLOCKFLICK;
-    
-    bitMask >>= 1;
-    MSDATASET(data_cpy & bitMask);
-    MSCLOCKFLICK;
-    
-    bitMask >>= 1;
-    MSDATASET(data_cpy & bitMask);
-    MSCLOCKFLICK;
-    
-    bitMask >>= 1;
-    MSDATASET(data_cpy & bitMask);
-    MSCLOCKFLICK;
+    for (byte bitMask = 0b1000; bitMask; bitMask >>= 1) {
+      MSDATASET(data[i] & bitMask);
+      MSCLOCKFLICK;
+    }
   }
   MSLATCHHIGH;
 }
 
-void emptyDisplay(){
-  /*
-   * push 0b00001111 to all register
-   * for nixie tube to turn off all light
-   */
-   
+/*
+ * Push 0x0F to all register
+ * for nixie tube to turn off all light.
+ */
+static inline void __attribute__((optimize("-O3"))) emptyDisplay(){   
   MSLATCHLOW;
   for (int i = 0; i < IC_COUNT; ++i) {
     MSCLOCKLOW;
-    MSDATALOW;
     
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
+    MSDATALOW;
+    for (int j = 0; j < 4; ++j)
+      MSCLOCKFLICK;
 
     MSDATAHIGH;
-    
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
-    MSCLOCKFLICK;
+    for (int j = 0; j < 4; ++j)
+      MSCLOCKFLICK;
   }
   MSLATCHHIGH;
 }
+
+#define SET_HR(HOUR)\
+do {\
+  numberToDisplay[5] = NO_LIGHT;\
+  numberToDisplay[IC_COUNT - 1] = (HOUR) / 10;\
+  numberToDisplay[IC_COUNT - 2] = (HOUR) % 10;\
+} while(0)
+
+#ifdef IC_COUNT_8
+#define SET_MIN(MINUTE)\
+do {\
+  numberToDisplay[4] = (MINUTE) / 10;\
+  numberToDisplay[3] = (MINUTE) % 10;\
+  numberToDisplay[2] = NO_LIGHT;\
+} while(0)
+#else
+#define SET_MIN(MINUTE)\
+do {\
+  numberToDisplay[3] = (MINUTE) / 10;\
+  numberToDisplay[2] = (MINUTE) % 10;\
+} while(0)
+#endif
+
+#define SET_SEC(SECOND)\
+do {\
+  numberToDisplay[1] = (SECOND) / 10;\
+  numberToDisplay[0] = (SECOND) % 10;\
+} while(0)
+
+#define SET_MONTH(MONTH)\
+do {\
+  numberToDisplay[3] = (MONTH) / 10;\
+  numberToDisplay[2] = (MONTH) % 10;\
+} while(0)
+
+#define SET_DAY(DAY)\
+do {\
+  numberToDisplay[1] = (DAY) / 10;\
+  numberToDisplay[0] = (DAY) % 10;\
+} while(0)
+
+#define SET_YEAR(YEAR)\
+do {\
+  int _year = (YEAR);\
+  for (int i = 4; i < IC_COUNT; ++i) {\
+    numberToDisplay[i] = _year % 10;\
+    _year /= 10;\
+  }\
+} while(0)
+
+#define CLR_HR()\
+do {\
+  numberToDisplay[IC_COUNT - 1] = NO_LIGHT;\
+  numberToDisplay[IC_COUNT - 2] = NO_LIGHT;\
+} while(0)
+
+#ifdef IC_COUNT_8
+#define CLR_MIN()\
+do {\
+  numberToDisplay[4] = NO_LIGHT;\
+  numberToDisplay[3] = NO_LIGHT;\
+} while(0)
+#else
+#define CLR_MIN()\
+do {\
+  numberToDisplay[3] = NO_LIGHT;\
+  numberToDisplay[2] = NO_LIGHT;\
+} while(0)
+#endif
+
+#define CLR_SEC()\
+do {\
+  numberToDisplay[1] = NO_LIGHT;\
+  numberToDisplay[0] = NO_LIGHT;\
+} while(0)
+
+#define CLR_MONTH()\
+do {\
+  numberToDisplay[3] = NO_LIGHT;\
+  numberToDisplay[2] = NO_LIGHT;\
+} while(0)
+
+#define CLR_DAY()\
+do {\
+  numberToDisplay[1] = NO_LIGHT;\
+  numberToDisplay[0] = NO_LIGHT;\
+} while(0)
+
+#define CLR_YEAR()\
+do {\
+  for (int i = 4; i < IC_COUNT; ++i)\
+    numberToDisplay[i] = NO_LIGHT;\
+} while(0)
