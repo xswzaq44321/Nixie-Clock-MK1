@@ -272,7 +272,7 @@ byte alarm_m = 30;
 
 byte adjust_hr  = 0;
 byte adjust_min = 0;
-int  adjust_y   = 0;
+uint16_t  adjust_y   = 0;
 byte adjust_mon = 0;
 byte adjust_d   = 0;
 byte adjust_s   = 0;
@@ -356,7 +356,7 @@ inline void updateDate() {
   if (system_mode & MD_UPDATE || tmp_t.day() != currentTime.day()) {
     currentTime = tmp_t;
 
-    byte tmp_y = currentTime.year() + adjust_y;
+    uint16_t tmp_y = currentTime.year() + adjust_y;
     byte tmp_mon = (currentTime.month() + adjust_mon - 1) % 12 + 1;
     byte tmp_d = (currentTime.day() + adjust_d  - 1) % 31 + 1;
 
